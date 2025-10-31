@@ -2,17 +2,20 @@ pipeline {
   agent any
 
   environment {
-    // ====== CHANGE THESE IF NEEDED ======
+    // ====== CHANGE THESE 2 ======
     DOCKERHUB_USER = 'rahul5553'
     IMAGE_NAME     = '1234'
-    APP_NAME       = 'flask-app'   // Kubernetes Deployment name
-    CONTAINER_NAME = 'flask'       // container name in the Deployment spec
-    // ====================================
+    // ============================
 
-    IMAGE_TAG      = "${env.BUILD_NUMBER}"
-    KUBECONFIG     = 'C:\\Users\\Rahul\\.kube\\config'
-    MINIKUBE_HOME  = 'C:\\Users\\Rahul\\.minikube'
+    // Tag image with Jenkins build number and also 'latest'
+    IMAGE_TAG   = "${env.BUILD_NUMBER}"
 
+    // Tell kubectl/minikube where to find your local configs (Windows paths)
+    // Make sure these paths exist for the Jenkins service account.
+    KUBECONFIG   = 'C:\\Users\\Rahul\\.kube\\config'
+    MINIKUBE_HOME= 'C:\\Users\\Rahul\\.minikube'
+
+    // Optional: pin the manifest paths (committed in repo)
     DEPLOYMENT_YAML = 'deployment.yaml'
     SERVICE_YAML    = 'service.yaml'
   }
@@ -23,7 +26,6 @@ pipeline {
   }
 
   stages {
-
     stage('Checkout') {
       steps {
         echo '📥 Checking out code...'
@@ -35,6 +37,7 @@ pipeline {
       steps {
         echo "🛠 Building Docker image: ${DOCKERHUB_USER}/${IMAGE_NAME}:${IMAGE_TAG}"
         bat """
+          docker version
           docker build -t ${DOCKERHUB_USER}/${IMAGE_NAME}:${IMAGE_TAG} -t ${DOCKERHUB_USER}/${IMAGE_NAME}:latest .
         """
       }
@@ -55,59 +58,29 @@ pipeline {
 
     stage('Kube Context (minikube)') {
       steps {
-        echo '🔧 Point kubectl to minikube'
+        echo '🔧 Ensuring kubectl talks to minikube...'
+        // If Jenkins runs as a different user, ensure KUBECONFIG/MINIKUBE_HOME point to that user’s files or run Jenkins as Rahul.
         bat """
+          where kubectl
+          where minikube
+          minikube status
           minikube update-context
           kubectl config use-context minikube
+          kubectl cluster-info
           kubectl get nodes
         """
       }
     }
 
-    stage('Apply Base Manifests') {
+    stage('Deploy to Kubernetes') {
       steps {
-        echo '📄 Ensure resources exist'
+        echo '🚀 Applying manifests...'
         bat """
           kubectl apply -f ${DEPLOYMENT_YAML}
           kubectl apply -f ${SERVICE_YAML}
-          kubectl get deploy,svc
+          kubectl rollout status deployment/flask-app --timeout=120s
+          kubectl get deploy,po,svc -o wide
         """
-      }
-    }
-
-    stage('Update Image & Rollout (with rollback)') {
-      steps {
-        script {
-          echo "🚀 Setting image to ${DOCKERHUB_USER}/${IMAGE_NAME}:${IMAGE_TAG} and rolling out…"
-
-          // Show history before change (for visibility)
-          bat "kubectl rollout history deployment/${APP_NAME}"
-
-          // Try the rollout; if it fails, rollback
-          try {
-            // Set the new image (this creates a new ReplicaSet)
-            bat """
-              kubectl set image deployment/${APP_NAME} ${CONTAINER_NAME}=${DOCKERHUB_USER}/${IMAGE_NAME}:${IMAGE_TAG}
-            """
-
-            // Wait for rollout success (timeout if not healthy)
-            bat """
-              kubectl rollout status deployment/${APP_NAME} --timeout=120s
-            """
-
-            echo "✅ Rollout healthy for image tag ${IMAGE_TAG}"
-          } catch (err) {
-            echo "❌ Rollout failed. Rolling back…"
-            // Undo to previous working ReplicaSet
-            bat "kubectl rollout undo deployment/${APP_NAME}"
-            // Optional: wait for the rollback to become healthy
-            bat "kubectl rollout status deployment/${APP_NAME} --timeout=120s"
-            error("Rollback executed due to failed rollout.")
-          }
-
-          // Show history after change
-          bat "kubectl rollout history deployment/${APP_NAME}"
-        }
       }
     }
   }
@@ -115,11 +88,9 @@ pipeline {
   post {
     success {
       echo "✅ Build #${env.BUILD_NUMBER} OK — deployed ${DOCKERHUB_USER}/${IMAGE_NAME}:${IMAGE_TAG}"
-      bat "kubectl get deploy,po,svc -o wide"
     }
     failure {
-      echo "❌ Build failed. Check logs above (push/rollout/rollback details)."
-      bat "kubectl get deploy,po,svc -o wide || ver > nul"
+      echo "❌ Build failed. Check which stage broke (Docker build/push or kubectl)."
     }
     always {
       echo '📜 Pipeline finished.'
