@@ -15,6 +15,7 @@ spec:
       containers:
         - name: flask
           image: rahul5553/1234:latest
+          imagePullPolicy: Always
           ports:
             - containerPort: 5000
           readinessProbe:
